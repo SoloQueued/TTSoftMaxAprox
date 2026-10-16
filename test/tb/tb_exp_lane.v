@@ -9,12 +9,12 @@ module tb_exp_lane;
     #1;
   end
 
-  reg  [7:0] x_i;
-  wire [7:0] exp_o;
+  reg  [11:0] n_i;
+  wire [7:0]  p_o;
 
   exp_lane dut (
-    .x_i(x_i),
-    .exp_o(exp_o)
+    .n_i(n_i),
+    .p_o(p_o)
   );
 
 endmodule

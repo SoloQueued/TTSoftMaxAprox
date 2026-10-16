@@ -1,11 +1,18 @@
 # SPDX-FileCopyrightText: © 2024 Tiny Tapeout
 # SPDX-License-Identifier: Apache-2.0
 
+import math
+import random
+
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles, RisingEdge
-import math
-import random
+
+ONE = 256  # inputs are signed Q8.8
+
+
+def to_code(v: float) -> int:
+    return max(-32768, min(32767, int(round(v * ONE))))
 
 
 async def reset_dut(dut):
@@ -13,217 +20,101 @@ async def reset_dut(dut):
     dut.ui_in.value = 0
     dut.uio_in.value = 0
     dut.rst_n.value = 0
-    await ClockCycles(dut.clk, 8)
+    await ClockCycles(dut.clk, 4)
     dut.rst_n.value = 1
     await RisingEdge(dut.clk)
 
 
-async def run_softmax_transaction(dut, inputs):
-    # Start pulse in IDLE
+async def run_softmax_transaction(dut, codes):
+    # Start pulse in IDLE, then 8 bytes: high byte then low byte for each input
     dut.ui_in.value = 0x80
     await RisingEdge(dut.clk)
-
-    # 4 serialized inputs
-    for value in inputs:
-        dut.ui_in.value = value & 0xFF
+    for c in codes:
+        c &= 0xFFFF
+        dut.ui_in.value = c >> 8
         await RisingEdge(dut.clk)
-
+        dut.ui_in.value = c & 0xFF
+        await RisingEdge(dut.clk)
     dut.ui_in.value = 0
-
     outputs = []
     done_seen = False
-    for cyc in range(120):
+    for _ in range(150):
         await RisingEdge(dut.clk)
-        ser_valid = int(dut.uio_out.value) & 0x2
-        done_flag = int(dut.uio_out.value) & 0x1
-
-        if ser_valid:
+        if int(dut.uio_out.value) & 0x2:
             outputs.append(int(dut.uo_out.value))
-        if done_flag:
+        if int(dut.uio_out.value) & 0x1:
             done_seen = True
             break
-
     return outputs, done_seen
 
 
-def softmax_ref_u8(inputs):
-    m = max(inputs)
-    exps = [math.exp(x - m) for x in inputs]
-    s = sum(exps)
-    probs = [e / s for e in exps]
-    return [int(round(p * 255.0)) for p in probs]
+def softmax_ref(codes):
+    v = [c / ONE for c in codes]
+    m = max(v)
+    e = [math.exp(x - m) for x in v]
+    s = sum(e)
+    return [x / s for x in e]
 
 
-def l1_norm_err_u8(a, b):
-    return sum(abs(x - y) for x, y in zip(a, b)) / 255.0
+def l1_err(outputs, ref):
+    # total absolute error over the 4 probabilities (0 = exact, 2 = worst)
+    return sum(abs(o / 256 - r) for o, r in zip(outputs, ref))
+
+
+async def check_vector(dut, codes, tol=0.04):
+    await reset_dut(dut)
+    outputs, done_seen = await run_softmax_transaction(dut, codes)
+    assert done_seen and len(outputs) == 4, f"{codes}: protocol failure, got {outputs}"
+    for o in outputs:
+        assert 0 <= o <= 255
+    ref = softmax_ref(codes)
+    err = l1_err(outputs, ref)
+    assert err <= tol, f"{[c / ONE for c in codes]}: got {outputs}, ref {[round(r * 256) for r in ref]}, L1 {err:.3f}"
+    top = max(range(4), key=lambda i: codes[i])
+    assert outputs[top] == max(outputs), f"{codes}: largest input did not get the largest output {outputs}"
+    return err, outputs, ref
 
 
 @cocotb.test()
 async def test_project(dut):
-    dut._log.info("="*70)
-    dut._log.info("COMPREHENSIVE SOFTMAX TESTBENCH - 27 directed test vectors")
-    dut._log.info("="*70)
+    cocotb.start_soon(Clock(dut.clk, 100, unit="ns").start())
 
-    # 10 MHz clock
-    clock = Clock(dut.clk, 100, unit="ns")
-    cocotb.start_soon(clock.start())
-
-    # Comprehensive test vectors
-    test_vectors = [
-        # Basic cases (original)
-        [10, 20, 30, 40],        # Clear winner
-        [0, 0, 0, 0],            # All equal
-        [40, 10, 0, -5],         # Large spread
-        [-8, -6, -4, -2],        # Negative range
-        
-        # Edge cases
-        [127, 127, 127, 127],    # All max positive
-        [-128, -128, -128, -128],# All min negative
-        [127, -128, 0, 64],      # Full range mix
-        
-        # Monotonicity/ordering tests
-        [1, 2, 3, 4],            # Strictly increasing
-        [4, 3, 2, 1],            # Strictly decreasing
-        [50, 50, 50, 51],        # Almost equal with slight winner
-        [100, 100, 50, 50],      # Two pairs
-        
-        # Small differences (differentiation test)
-        [10, 11, 12, 13],        # 1 unit steps
-        [20, 20, 20, 21],        # One different by 1
-        [30, 31, 30, 31],        # Alternating
-        
-        # Large spread tests
-        [-50, -40, 40, 50],      # Large neg to large pos
-        [100, 0, 0, 0],          # One dominant
-        [0, 0, 0, 100],          # Last one dominant
-        
-        # Boundary conditions
-        [-8, -8, -8, -8],        # Lower negative bound
-        [50, 50, 50, 50],        # High equal
-        [0, 0, 0, 1],            # Minimal difference at boundary
-        
-        # Random-like patterns
-        [7, 13, 21, 34],         # Fibonacci-like
-        [15, 25, 8, 32],         # Random mix
-        [42, 42, 43, 41],        # Clustering
-        [5, -10, 15, -5],        # Mixed signs
-        [-30, -20, -10, 0],      # Negative to zero
-        [10, 10, 10, 10],        # Perfect equal (repeat)
-        [99, 100, 101, 102],     # Near max boundary
+    directed = [
+        [1, 2, 3, 4], [0, 0, 0, 0], [4, 3, 2, 1], [0.5, 0.25, 0, -0.25],
+        [-8, -6, -4, -2], [127.996, 127.996, 127.996, 127.996], [-128, -128, -128, -128],
+        [127.996, -128, 0, 64], [50, 50, 50, 51], [100, 100, 50, 50], [10, 10.5, 11, 11.5],
+        [20, 20, 20, 21], [30, 30.75, 30, 30.75], [-50, -40, 40, 50], [0, 0, 0, 100],
+        [0, 0, 0, 1], [0, 0, 0, 0.0039], [1.1, 2.2, 0.3, -0.4], [-0.1, -0.2, -0.3, -0.4],
+        [3.14159, 2.71828, 1.41421, 1.73205], [42, 42, 43, 41], [5, -10, 15, -5],
+        [-30, -20, -10, 0], [99, 100, 101, 102], [0.01, 0.02, 0.03, 0.04],
+        [-6.5, 0, -6.5, -6.5], [-5.5, -5, -4.5, -4],
     ]
-
-    nonflat_cases = 0
     errs = []
-    argmax_errors = 0
-    passed_cases = 0
-    failed_cases = 0
-
-    for idx, vec in enumerate(test_vectors, start=1):
-        dut._log.info(f"\n[Case {idx:02d}] Testing: {vec}")
-        await reset_dut(dut)
-
-        outputs, done_seen = await run_softmax_transaction(dut, vec)
-        ref = softmax_ref_u8(vec)
-
-        # Basic assertions
-        try:
-            assert len(outputs) == 4, f"Expected 4 outputs, got {len(outputs)}"
-            assert done_seen, f"Done flag not observed"
-            
-            for lane, value in enumerate(outputs, start=1):
-                assert 0 <= value <= 255, f"Output {lane} out of range: {value}"
-            
-            spread = max(outputs) - min(outputs)
-            if spread > 0:
-                nonflat_cases += 1
-            
-            # Argmax check
-            if len(set(vec)) == len(vec) and spread >= 4:
-                got_argmax = max(range(4), key=lambda i: outputs[i])
-                ref_argmax = max(range(4), key=lambda i: vec[i])
-                if got_argmax != ref_argmax:
-                    argmax_errors += 1
-                    dut._log.warning(f"  Argmax mismatch: got {got_argmax}, expected {ref_argmax}")
-                else:
-                    dut._log.info(f"  ✓ Argmax correct: {ref_argmax}")
-            
-            # L1 error check (relaxed tolerance for minimal design)
-            err = l1_norm_err_u8(outputs, ref)
-            errs.append(err)
-            
-            # Tolerance: total absolute error across the 4 outputs, as a
-            # fraction of full scale (0 = exact, 2 = completely wrong).
-            assert err <= 0.05, f"L1 error too high: {err:.3f}"
-            
-            dut._log.info(f"  Output:  {outputs}")
-            dut._log.info(f"  Ref:     {ref}")
-            dut._log.info(f"  L1 err:  {err:.3f}")
-            passed_cases += 1
-            
-        except AssertionError as e:
-            dut._log.error(f"  ✗ FAILED: {str(e)}")
-            failed_cases += 1
-            raise
-
-    # Summary statistics
-    dut._log.info("\n" + "="*70)
-    dut._log.info("TEST SUMMARY")
-    dut._log.info("="*70)
-    dut._log.info(f"Total cases:        {len(test_vectors)}")
-    dut._log.info(f"Passed:             {passed_cases}")
-    dut._log.info(f"Failed:             {failed_cases}")
-    dut._log.info(f"Non-flat outputs:   {nonflat_cases}")
-    dut._log.info(f"Argmax errors:      {argmax_errors}")
-    
-    if errs:
-        avg_err = sum(errs) / len(errs)
-        max_err = max(errs)
-        min_err = min(errs)
-        dut._log.info(f"L1 error - Min:     {min_err:.3f}")
-        dut._log.info(f"L1 error - Max:     {max_err:.3f}")
-        dut._log.info(f"L1 error - Avg:     {avg_err:.3f}")
-    
-    dut._log.info("="*70)
-    
-    # Final assertions
-    assert failed_cases == 0, f"{failed_cases} test cases failed"
-    assert nonflat_cases >= 10, f"Expected at least 10 non-flat outputs, got {nonflat_cases}"
-    if len(errs) > 0:
-        avg_err = sum(errs) / len(errs)
-        assert avg_err <= 0.02, f"Average L1 error too high: {avg_err:.3f}"
-    assert argmax_errors == 0, f"{argmax_errors} argmax errors"
-    
-    dut._log.info("\n✓ ALL TESTS PASSED\n")
-
-    # Guardrail against completely degenerate behavior.
-    assert nonflat_cases >= 1, "All test cases produced flat outputs; expected at least one non-flat response"
-    avg_err = sum(errs) / len(errs)
-    assert avg_err <= 0.02, f"Average L1 error too high: {avg_err:.3f}"
+    for vec in directed:
+        codes = [to_code(v) for v in vec]
+        err, out, ref = await check_vector(dut, codes)
+        errs.append(err)
+        dut._log.info(f"{vec} -> {out} (ref {[round(r * 256) for r in ref]}), L1 {err:.4f}")
+    avg = sum(errs) / len(errs)
+    dut._log.info(f"Directed: {len(errs)} vectors, L1 avg {avg:.4f}, max {max(errs):.4f}")
+    assert avg <= 0.015, f"Average L1 error too high: {avg:.4f}"
 
 
 @cocotb.test()
 async def test_random_vectors(dut):
-    """500 random input sets, each checked against floating-point softmax."""
-    clock = Clock(dut.clk, 100, unit="ns")
-    cocotb.start_soon(clock.start())
+    """500 random input sets: half spread over the full range, half clustered
+    within +/-2.0, where softmax is soft and precision matters most."""
+    cocotb.start_soon(Clock(dut.clk, 100, unit="ns").start())
     rng = random.Random(2026)
     errs = []
-    for _ in range(500):
-        # Mix wide-range inputs with tightly clustered ones (where softmax is
-        # most sensitive), since clustered inputs exercise every exp value.
-        if rng.random() < 0.5:
-            vec = [rng.randint(-128, 127) for _ in range(4)]
+    for i in range(500):
+        if i % 2:
+            codes = [rng.randint(-32768, 32767) for _ in range(4)]
         else:
-            base = rng.randint(-120, 120)
-            vec = [max(-128, min(127, base + rng.randint(-7, 7))) for _ in range(4)]
-        await reset_dut(dut)
-        outputs, done_seen = await run_softmax_transaction(dut, vec)
-        assert done_seen and len(outputs) == 4, f"{vec}: protocol failure {outputs}"
-        ref = softmax_ref_u8(vec)
-        err = l1_norm_err_u8(outputs, ref)
+            base = rng.randint(-30000, 30000)
+            codes = [max(-32768, min(32767, base + rng.randint(-512, 512))) for _ in range(4)]
+        err, _, _ = await check_vector(dut, codes)
         errs.append(err)
-        assert err <= 0.05, f"{vec}: got {outputs}, ref {ref}, L1 {err:.3f}"
-        # Largest input must get the largest (or tied-largest) output.
-        top = max(range(4), key=lambda i: vec[i])
-        assert outputs[top] == max(outputs), f"{vec}: argmax wrong, got {outputs}"
-    dut._log.info(f"Random sweep: 500 vectors, L1 avg {sum(errs)/len(errs):.4f}, max {max(errs):.4f}")
+    avg = sum(errs) / len(errs)
+    dut._log.info(f"Random sweep: 500 vectors, L1 avg {avg:.4f}, max {max(errs):.4f}")
+    assert avg <= 0.015, f"Average L1 error too high: {avg:.4f}"

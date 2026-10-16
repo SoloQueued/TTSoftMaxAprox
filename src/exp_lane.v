@@ -5,25 +5,29 @@
 
 `default_nettype none
 
-module exp_lane( //e^n scaled to 8 bits for integer n = x - max <= 0
-    input  wire [7:0] x_i,  // signed, <= 0 after max subtraction
-    output reg  [7:0] exp_o // round(255 * e^n)
+module exp_lane( //LUT-less e^x: 8-segment PWL, slopes are shifts only
+    input  wire [11:0] n_i,   // signed Q4.8, x - max, in [-8.0, 0]
+    output reg  [7:0]  p_o    // ~255 * e^n, 0..255
 );
 
-    // Inputs are integers, so after subtracting the max there are only seven
-    // non-zero results; e^-7 * 255 already rounds to 0. A 7-way select is exact
-    // and smaller than a piecewise-linear approximation.
+    // Each segment is y = (n >>> a) +/- (n >>> c) + b: the slope is one or two
+    // powers of two, so there is no multiplier and no lookup table. Breakpoints
+    // and offsets were fitted to 255*e^x over [-8, 0] for at most 1.84 LSB error.
+    wire signed [13:0] n = {{2{n_i[11]}}, n_i};
+    reg  signed [13:0] y;
+
     always @(*) begin
-        case (x_i)
-            8'h00:   exp_o = 8'd255; //  0
-            8'hFF:   exp_o = 8'd94;  // -1
-            8'hFE:   exp_o = 8'd35;  // -2
-            8'hFD:   exp_o = 8'd13;  // -3
-            8'hFC:   exp_o = 8'd5;   // -4
-            8'hFB:   exp_o = 8'd2;   // -5
-            8'hFA:   exp_o = 8'd1;   // -6
-            default: exp_o = 8'd0;   // <= -7 (and positive inputs, which can't occur)
-        endcase
+        y = 14'sd0;
+        if      (n >=    -76) y = (n >>> 0) - (n >>> 3)      + 254;
+        else if (n >=   -159) y = (n >>> 1) + (n >>> 3)      + 236;
+        else if (n >=   -257) y = (n >>> 1) - (n >>> 4)      + 205;
+        else if (n >=   -337) y = (n >>> 2) + (n >>> 4)      + 174;
+        else if (n >=   -453) y = (n >>> 2) - (n >>> 5)      + 141;
+        else if (n >=   -654) y = (n >>> 3) - (n >>> 7)      + 95;
+        else if (n >=   -903) y = (n >>> 4) - (n >>> 6)      + 49;
+        else if (n >=  -1665) y = (n >>> 7) + (n >>> 10)     + 15;
+        if (n < -1665) y = 14'sd0;    // 255 * e^x rounds to 0 below -6.5
+        p_o = (y < 0) ? 8'd0 : (y > 255) ? 8'd255 : y[7:0];
     end
 
 endmodule

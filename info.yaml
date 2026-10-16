@@ -3,7 +3,7 @@ project:
   title:        "nonLUT_softmax"      # Project title
   author:       "DerekTDLe"      # Your name
   discord:      ""      # Your discord username, for communication and automatically assigning you a Tapeout role (optional)
-  description:  "4-input softmax accelerator: exact integer exp and a shared serial divider"      # One line description of what your project does
+  description:  "LUT-less 4-input softmax for Q8.8 inputs: shift-only PWL exp and a shared serial divider"      # One line description of what your project does
   language:     "Verilog" # other examples include SystemVerilog, Amaranth, VHDL, etc
   clock_hz:     10000000       # Clock frequency in Hz (or 0 if not applicable)
 
@@ -18,24 +18,23 @@ project:
   # Don't forget to also update `PROJECT_SOURCES` in test/Makefile.
   source_files:
     - "project.v"
-    - "max4_signed8.v"
-    - "norm_sub4.v"
+    - "max4_signed16.v"
+    - "norm_sub.v"
     - "exp_lane.v"
-    - "sum4_tree.v"
     - "norm_div.v"
 
 # The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
 # This section is for the datasheet/website. Use descriptive names (e.g., RX, TX, MOSI, SCL, SEG_A, etc.).
 pinout:
   # Inputs
-  ui[0]: "x_in[0] / serial data bit[0]"
-  ui[1]: "x_in[1] / serial data bit[1]"
-  ui[2]: "x_in[2] / serial data bit[2]"
-  ui[3]: "x_in[3] / serial data bit[3]"
-  ui[4]: "x_in[4] / serial data bit[4]"
-  ui[5]: "x_in[5] / serial data bit[5]"
-  ui[6]: "x_in[6] / serial data bit[6]"
-  ui[7]: "start / serial data bit[7]"
+  ui[0]: "input byte bit 0 (Q8.8 high byte, then low byte)"
+  ui[1]: "input byte bit 1 (Q8.8 high byte, then low byte)"
+  ui[2]: "input byte bit 2 (Q8.8 high byte, then low byte)"
+  ui[3]: "input byte bit 3 (Q8.8 high byte, then low byte)"
+  ui[4]: "input byte bit 4 (Q8.8 high byte, then low byte)"
+  ui[5]: "input byte bit 5 (Q8.8 high byte, then low byte)"
+  ui[6]: "input byte bit 6 (Q8.8 high byte, then low byte)"
+  ui[7]: "start (when idle) / input byte bit 7"
 
   # Outputs
   uo[0]: "softmax_out[0] / serial data bit[0]"
