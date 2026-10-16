@@ -3,7 +3,7 @@ project:
   title:        "nonLUT_softmax"      # Project title
   author:       "DerekTDLe"      # Your name
   discord:      ""      # Your discord username, for communication and automatically assigning you a Tapeout role (optional)
-  description:  "4-input LUT-less softmax accelerator using PWL exp and reciprocal approximation"      # One line description of what your project does
+  description:  "4-input softmax accelerator: exact integer exp and a shared serial divider"      # One line description of what your project does
   language:     "Verilog" # other examples include SystemVerilog, Amaranth, VHDL, etc
   clock_hz:     10000000       # Clock frequency in Hz (or 0 if not applicable)
 
@@ -20,11 +20,9 @@ project:
     - "project.v"
     - "max4_signed8.v"
     - "norm_sub4.v"
-    - "exp_pwl_lane.v"
+    - "exp_lane.v"
     - "sum4_tree.v"
-    - "recip_nr.v"
-    - "scale4_clip.v"
-    - "serializer4.v"
+    - "norm_div.v"
 
 # The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
 # This section is for the datasheet/website. Use descriptive names (e.g., RX, TX, MOSI, SCL, SEG_A, etc.).
@@ -51,7 +49,7 @@ pinout:
 
   # Bidirectional pins
   uio[0]: "done flag"
-  uio[1]: "serializer valid"
+  uio[1]: "output valid"
   uio[2]: ""
   uio[3]: ""
   uio[4]: ""

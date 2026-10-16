@@ -5,6 +5,7 @@ import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles, RisingEdge
 import math
+import random
 
 
 async def reset_dut(dut):
@@ -60,7 +61,7 @@ def l1_norm_err_u8(a, b):
 @cocotb.test()
 async def test_project(dut):
     dut._log.info("="*70)
-    dut._log.info("COMPREHENSIVE SOFTMAX TESTBENCH - 24+ test vectors")
+    dut._log.info("COMPREHENSIVE SOFTMAX TESTBENCH - 27 directed test vectors")
     dut._log.info("="*70)
 
     # 10 MHz clock
@@ -150,8 +151,9 @@ async def test_project(dut):
             err = l1_norm_err_u8(outputs, ref)
             errs.append(err)
             
-            # Tolerance: 1.5 for this highly optimized design
-            assert err <= 1.50, f"L1 error too high: {err:.3f}"
+            # Tolerance: total absolute error across the 4 outputs, as a
+            # fraction of full scale (0 = exact, 2 = completely wrong).
+            assert err <= 0.05, f"L1 error too high: {err:.3f}"
             
             dut._log.info(f"  Output:  {outputs}")
             dut._log.info(f"  Ref:     {ref}")
@@ -188,11 +190,40 @@ async def test_project(dut):
     assert nonflat_cases >= 10, f"Expected at least 10 non-flat outputs, got {nonflat_cases}"
     if len(errs) > 0:
         avg_err = sum(errs) / len(errs)
-        assert avg_err <= 1.20, f"Average L1 error too high: {avg_err:.3f}"
+        assert avg_err <= 0.02, f"Average L1 error too high: {avg_err:.3f}"
+    assert argmax_errors == 0, f"{argmax_errors} argmax errors"
     
     dut._log.info("\n✓ ALL TESTS PASSED\n")
 
     # Guardrail against completely degenerate behavior.
     assert nonflat_cases >= 1, "All test cases produced flat outputs; expected at least one non-flat response"
     avg_err = sum(errs) / len(errs)
-    assert avg_err <= 1.05, f"Average L1 error too high: {avg_err:.3f}"
+    assert avg_err <= 0.02, f"Average L1 error too high: {avg_err:.3f}"
+
+
+@cocotb.test()
+async def test_random_vectors(dut):
+    """500 random input sets, each checked against floating-point softmax."""
+    clock = Clock(dut.clk, 100, unit="ns")
+    cocotb.start_soon(clock.start())
+    rng = random.Random(2026)
+    errs = []
+    for _ in range(500):
+        # Mix wide-range inputs with tightly clustered ones (where softmax is
+        # most sensitive), since clustered inputs exercise every exp value.
+        if rng.random() < 0.5:
+            vec = [rng.randint(-128, 127) for _ in range(4)]
+        else:
+            base = rng.randint(-120, 120)
+            vec = [max(-128, min(127, base + rng.randint(-7, 7))) for _ in range(4)]
+        await reset_dut(dut)
+        outputs, done_seen = await run_softmax_transaction(dut, vec)
+        assert done_seen and len(outputs) == 4, f"{vec}: protocol failure {outputs}"
+        ref = softmax_ref_u8(vec)
+        err = l1_norm_err_u8(outputs, ref)
+        errs.append(err)
+        assert err <= 0.05, f"{vec}: got {outputs}, ref {ref}, L1 {err:.3f}"
+        # Largest input must get the largest (or tied-largest) output.
+        top = max(range(4), key=lambda i: vec[i])
+        assert outputs[top] == max(outputs), f"{vec}: argmax wrong, got {outputs}"
+    dut._log.info(f"Random sweep: 500 vectors, L1 avg {sum(errs)/len(errs):.4f}, max {max(errs):.4f}")

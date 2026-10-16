@@ -18,6 +18,7 @@ async def test_norm_sub4_basic(dut):
         (-1, -2, -3, -4, -1),
         (127, -128, 0, 64, 127),
         (0, 0, 0, 0, 0),
+        (-128, -100, 0, 127, 127),
     ]
 
     for idx, (a, b, c, d, m) in enumerate(vectors, start=1):
@@ -29,10 +30,10 @@ async def test_norm_sub4_basic(dut):
 
         await Timer(1, unit="ns")
 
-        exp_a = to_s8(a - m)
-        exp_b = to_s8(b - m)
-        exp_c = to_s8(c - m)
-        exp_d = to_s8(d - m)
+        exp_a = max(-128, a - m)  # saturates instead of wrapping
+        exp_b = max(-128, b - m)
+        exp_c = max(-128, c - m)
+        exp_d = max(-128, d - m)
 
         got_a = to_s8(int(dut.a_o.value))
         got_b = to_s8(int(dut.b_o.value))
