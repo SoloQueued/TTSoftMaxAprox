@@ -57,4 +57,3 @@ make test-all        # all of the above
 - Template reference: https://github.com/TinyTapeout/ttsky-verilog-template
 - Program info: https://tinytapeout.com/
 
-For assignment submission, provide the public repository URL and the full commit SHA you want graded.
